@@ -1,0 +1,9 @@
+[package]
+name = "nand2tetris-asm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.96"
+clap = "4.5.31"
+nom = "8.0.0"
