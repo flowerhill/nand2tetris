@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+
 use std::{
+    collections::HashMap,
     env,
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
@@ -18,7 +20,10 @@ fn main() -> Result<()> {
     let assmbly_code = read_assembly(input_file)?;
 
     let code = preprocess(assmbly_code);
-    let binary = assemble(&code)?;
+
+    let symbol_table = build_symbol_table(&code);
+
+    let binary = assemble(&code, &symbol_table)?;
 
     let output_file = format!(
         "{}.hack",
@@ -65,23 +70,79 @@ fn preprocess(assembly_code: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn assemble(code: &[String]) -> Result<Vec<String>> {
+fn build_symbol_table(code: &[String]) -> HashMap<String, u16> {
+    // 初期化初期化
+    let mut symbol_table = HashMap::new();
+
+    symbol_table.insert(String::from("R0"), 0);
+    symbol_table.insert(String::from("R1"), 1);
+    symbol_table.insert(String::from("R2"), 2);
+    symbol_table.insert(String::from("R3"), 3);
+    symbol_table.insert(String::from("R4"), 4);
+    symbol_table.insert(String::from("R5"), 5);
+    symbol_table.insert(String::from("R6"), 6);
+    symbol_table.insert(String::from("R7"), 7);
+    symbol_table.insert(String::from("R8"), 8);
+    symbol_table.insert(String::from("R9"), 9);
+    symbol_table.insert(String::from("R10"), 10);
+    symbol_table.insert(String::from("R11"), 11);
+    symbol_table.insert(String::from("R12"), 12);
+    symbol_table.insert(String::from("R13"), 13);
+    symbol_table.insert(String::from("R14"), 14);
+    symbol_table.insert(String::from("R15"), 15);
+
+    symbol_table.insert(String::from("SP"), 0);
+    symbol_table.insert(String::from("LCL"), 2);
+    symbol_table.insert(String::from("ARG"), 3);
+    symbol_table.insert(String::from("THIS"), 4);
+
+    symbol_table.insert(String::from("SCREEN"), 16384);
+    symbol_table.insert(String::from("KBD"), 24576);
+
+    // 1回目のパス ラベルのみ処理
+    let mut current_line_num = 0;
+    for line in code {
+        if line.starts_with('(') && line.ends_with(')') {
+            let label = &line[1..line.len() - 1];
+            symbol_table.insert(label.to_string(), current_line_num);
+        } else {
+            current_line_num += 1;
+        }
+    }
+
+    // 2回目のパス 変数を処理
+    let mut not_defined_variable = 16; // 未定義の変数は16から
+    for line in code {
+        if line.starts_with('@') && line[1..].parse::<u16>().is_err() {
+            let symbol = &line[1..];
+            if !symbol_table.contains_key(symbol) {
+                symbol_table.insert(symbol.to_string(), not_defined_variable);
+                not_defined_variable += 1;
+            }
+        }
+    }
+
+    symbol_table
+}
+
+fn assemble(code: &[String], symbol_table: &HashMap<String, u16>) -> Result<Vec<String>> {
     let mut binary_code = vec![];
 
     for line in code {
-        if line.starts_with('(') && line.starts_with(')') {
+        if line.starts_with('(') && line.ends_with(')') {
             continue;
         }
 
-        if line.starts_with('@') {
+        if let Some(sym) = line.strip_prefix('@') {
             // A命令
-            let start = 1;
-            let val = if let Ok(num) = line[start..].parse::<u16>() {
+            let val = if let Ok(num) = sym.parse::<u16>() {
                 // 数値
                 num
             } else {
                 // シンボル
-                todo!()
+                *symbol_table
+                    .get(sym)
+                    .with_context(|| format!("undefined symbol: {}", &sym[1..]))?
             };
             let binary = format!("{:016b}\n", val);
             binary_code.push(binary);
@@ -105,7 +166,7 @@ fn assemble(code: &[String]) -> Result<Vec<String>> {
                     if dest_parts.contains('D') { "1" } else { "0" },
                     if dest_parts.contains('M') { "1" } else { "0" },
                 );
-                let comp = comp_table(dc_parts[0])?;
+                let comp = comp_table(dc_parts[1])?;
                 (dest, comp.to_string())
             } else {
                 let dest = String::from("000");
