@@ -139,7 +139,7 @@ impl CodeWriter {
                     "@SP".to_string(),
                     "M=M-1".to_string(),
                     "A=M".to_string(),
-                    "M=M+D".to_string(),
+                    "M=D+M".to_string(),
                     "@SP".to_string(),
                     "M=M+1".to_string(),
                 ]);
@@ -169,7 +169,7 @@ impl CodeWriter {
                 ]);
             }
             "eq" | "gt" | "lt" => {
-                let jmp_cond = match cmd {
+                let jump_condition = match cmd {
                     "eq" => "JEQ",
                     "gt" => "JGT",
                     "lt" => "JLT",
@@ -190,7 +190,7 @@ impl CodeWriter {
                     "A=M".to_string(),
                     "D=M-D".to_string(),
                     format!("@{}", true_label),
-                    format!("D;{}", true_label),
+                    format!("D;{}", jump_condition),
                     "@SP".to_string(),
                     "A=M".to_string(),
                     "M=0".to_string(),
@@ -255,7 +255,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@ARG".to_string(),
-                        "A=M+D".to_string(),
+                        "A=D+M".to_string(),
                         "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
@@ -268,8 +268,8 @@ impl CodeWriter {
                     self.output.extend(vec![
                         format!("@{}", index),
                         "D=A".to_string(),
-                        "@THIS".to_string(),
-                        "A=M+D".to_string(),
+                        "@LCL".to_string(),
+                        "A=D+M".to_string(),
                         "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
@@ -281,7 +281,7 @@ impl CodeWriter {
                 "static" => {
                     self.output.extend(vec![
                         format!("@{}.{}", self.filename, index),
-                        "D=A".to_string(),
+                        "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
                         "M=D".to_string(),
@@ -304,8 +304,8 @@ impl CodeWriter {
                     self.output.extend(vec![
                         format!("@{}", index),
                         "D=A".to_string(),
-                        "@LCL".to_string(),
-                        "A=M+D".to_string(),
+                        "@THIS".to_string(),
+                        "A=D+M".to_string(),
                         "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
@@ -319,7 +319,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@THAT".to_string(),
-                        "A=M+D".to_string(),
+                        "A=D+M".to_string(),
                         "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
@@ -333,7 +333,7 @@ impl CodeWriter {
 
                     self.output.extend(vec![
                         format!("@{}", register),
-                        "D=A".to_string(),
+                        "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
                         "M=D".to_string(),
@@ -344,7 +344,7 @@ impl CodeWriter {
                 "temp" => {
                     self.output.extend(vec![
                         format!("@{}", 5 + index),
-                        "D=A".to_string(),
+                        "D=M".to_string(),
                         "@SP".to_string(),
                         "A=M".to_string(),
                         "M=D".to_string(),
@@ -360,7 +360,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@ARG".to_string(),
-                        "D=M+D".to_string(),
+                        "D=D+M".to_string(),
                         "@R13".to_string(),
                         "M=D".to_string(),
                         "@SP".to_string(),
@@ -377,7 +377,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@LCL".to_string(),
-                        "D=M+D".to_string(),
+                        "D=D+M".to_string(),
                         "@R13".to_string(),
                         "M=D".to_string(),
                         "@SP".to_string(),
@@ -404,7 +404,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@THIS".to_string(),
-                        "D=M+D".to_string(),
+                        "D=D+M".to_string(),
                         "@R13".to_string(),
                         "M=D".to_string(),
                         "@SP".to_string(),
@@ -421,7 +421,7 @@ impl CodeWriter {
                         format!("@{}", index),
                         "D=A".to_string(),
                         "@THAT".to_string(),
-                        "D=M+D".to_string(),
+                        "D=D+M".to_string(),
                         "@R13".to_string(),
                         "M=D".to_string(),
                         "@SP".to_string(),
@@ -515,7 +515,7 @@ mod tests {
         let input = "push constant 7\npush constant 8\nadd";
         let result = VMTranslator::translate(input, "test");
         assert!(result.contains("D=A"));
-        assert!(result.contains("M=M+D"));
+        assert!(result.contains("M=D+M"));
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod tests {
         let input = "pop local 0";
         let result = VMTranslator::translate(input, "test");
         assert!(result.contains("@LCL"));
-        assert!(result.contains("M+D"));
+        assert!(result.contains("D+M"));
     }
 }
 
