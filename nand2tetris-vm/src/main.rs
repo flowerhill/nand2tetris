@@ -25,6 +25,9 @@ enum CommandType {
     Label,
     Goto,
     IfGoto,
+    Call,
+    Function,
+    Return,
 }
 
 struct Command {
@@ -148,6 +151,38 @@ impl Parser {
                     arg2: None,
                 })
             }
+            "call" => {
+                let f_name = parts
+                    .get(1)
+                    .context("Missing function for 'call' command")?;
+                let n_vars: i32 = parts
+                    .get(2)
+                    .context("Missing local variable count for 'call' command")?
+                    .parse()
+                    .context("Invalid number for variable count")?;
+
+                Ok(Command {
+                    command_type: CommandType::Call,
+                    arg1: Some(f_name.to_string()),
+                    arg2: Some(n_vars),
+                })
+            }
+            "function" => {
+                let f_name = parts
+                    .get(1)
+                    .context("Missing function for 'call' command")?;
+                let n_vars: i32 = parts
+                    .get(2)
+                    .context("Missing local variable count for 'call' command")?
+                    .parse()
+                    .context("Invalid number for variable count")?;
+
+                Ok(Command {
+                    command_type: CommandType::Function,
+                    arg1: Some(f_name.to_string()),
+                    arg2: Some(n_vars),
+                })
+            }
             _ => bail!(format!("Unkonown command: '{}'", cmd_name)),
         }
     }
@@ -161,6 +196,7 @@ struct CodeWriter {
     output: Vec<String>,
     filename: String,
     label_counter: i32,
+    call_counter: i32,
 }
 
 impl CodeWriter {
@@ -169,6 +205,7 @@ impl CodeWriter {
             output: Vec::new(),
             filename: filename.to_string(),
             label_counter: 0,
+            call_counter: 0,
         }
     }
 
@@ -294,106 +331,29 @@ impl CodeWriter {
     fn write_push(&mut self, segment: &str, index: i32) {
         match segment {
             "argument" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@ARG".to_string(),
-                    "A=D+M".to_string(),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_segment("ARG", index);
             }
             "local" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@LCL".to_string(),
-                    "A=D+M".to_string(),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_segment("LCL", index);
             }
             "static" => {
-                self.output.extend(vec![
-                    format!("@{}.{}", self.filename, index),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_value(&format!("{}.{}", self.filename, index), false);
             }
             "constant" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_value(&index.to_string(), true);
             }
             "this" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@THIS".to_string(),
-                    "A=D+M".to_string(),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_segment("THIS", index);
             }
             "that" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@THAT".to_string(),
-                    "A=D+M".to_string(),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_segment("THAT", index);
             }
             "pointer" => {
                 let register = if index == 0 { "THIS" } else { "THAT" };
-
-                self.output.extend(vec![
-                    format!("@{}", register),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_value(register, false);
             }
             "temp" => {
-                self.output.extend(vec![
-                    format!("@{}", 5 + index),
-                    "D=M".to_string(),
-                    "@SP".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M+1".to_string(),
-                ]);
+                self.push_value(&(5 + index).to_string(), false);
             }
             _ => unreachable!(),
         }
@@ -402,103 +362,26 @@ impl CodeWriter {
     fn write_pop(&mut self, segment: &str, index: i32) {
         match segment {
             "argument" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@ARG".to_string(),
-                    "D=D+M".to_string(),
-                    "@R13".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    "@R13".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                ]);
+                self.pop_segment("ARG", index);
             }
             "local" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@LCL".to_string(),
-                    "D=D+M".to_string(),
-                    "@R13".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    "@R13".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                ]);
+                self.pop_segment("LCL", index);
             }
             "static" => {
-                self.output.extend(vec![
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    format!("@{}.{}", self.filename, index),
-                    "M=D".to_string(),
-                ]);
+                self.pop_direct(&format!("{},{}", self.filename, index));
             }
             "this" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@THIS".to_string(),
-                    "D=D+M".to_string(),
-                    "@R13".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    "@R13".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                ]);
+                self.pop_segment("THIS", index);
             }
             "that" => {
-                self.output.extend(vec![
-                    format!("@{}", index),
-                    "D=A".to_string(),
-                    "@THAT".to_string(),
-                    "D=D+M".to_string(),
-                    "@R13".to_string(),
-                    "M=D".to_string(),
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    "@R13".to_string(),
-                    "A=M".to_string(),
-                    "M=D".to_string(),
-                ]);
+                self.pop_segment("THAT", index);
             }
             "pointer" => {
                 let register = if index == 0 { "THIS" } else { "THAT" };
-                self.output.extend(vec![
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    format!("@{}", register),
-                    "M=D".to_string(),
-                ]);
+                self.pop_direct(register);
             }
             "temp" => {
-                self.output.extend(vec![
-                    "@SP".to_string(),
-                    "M=M-1".to_string(),
-                    "A=M".to_string(),
-                    "D=M".to_string(),
-                    format!("@{}", 5 + index),
-                    "M=D".to_string(),
-                ]);
+                self.pop_direct(&(5 + index).to_string());
             }
             _ => unreachable!(),
         }
@@ -524,8 +407,109 @@ impl CodeWriter {
         ]);
     }
 
+    fn write_call(&mut self, function_name: &str, n_args: i32) {
+        let return_address_symbol = format!("{}$ret{}", function_name, self.call_counter);
+        self.push_value(&return_address_symbol, true);
+
+        for register in ["LCL", "ARG", "THIS", "THAT"] {
+            self.push_value(register, false);
+        }
+
+        // ARGを引数の最初の座標を指すようにする
+        // returnAddress, LCL, ARG, THIS, THAT と nArgs分SPをインクリメントしているので、
+        // SP - 5 - nArgsでArgの最初の座標を指す
+        self.output.extend(vec![
+            "@SP".to_string(),
+            "D=M".to_string(),
+            format!("@{}", 5 + n_args),
+            "D=D-A".to_string(),
+            "@ARG".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        self.output.extend(vec![
+            "@SP".to_string(),
+            "D=M".to_string(),
+            "@LCL".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        self.write_goto(function_name);
+
+        self.output.push(format!("{return_address_symbol}"));
+    }
+
+    fn write_function(&mut self, label: &str) {
+        todo!()
+    }
+
+    fn write_return(&mut self, label: &str) {
+        todo!()
+    }
+
     fn get_output(&self) -> String {
         self.output.join("\n")
+    }
+
+    // 値を直接push（定数またはレジスタの値）
+    fn push_value(&mut self, value: &str, is_address: bool) {
+        let address = if is_address { "A" } else { "M" };
+        self.output.extend(vec![
+            format!("@{value}"),
+            format!("D={address}"),
+            "@SP".to_string(),
+            "A=M".to_string(),
+            "M=D".to_string(),
+            "@SP".to_string(),
+            "M=M+1".to_string(),
+        ]);
+    }
+
+    // ベースアドレス + index の値をpush
+    fn push_segment(&mut self, base: &str, index: i32) {
+        self.output.extend(vec![
+            format!("@{}", index),
+            "D=A".to_string(),
+            format!("@{}", base),
+            "A=D+M".to_string(),
+            "D=M".to_string(),
+            "@SP".to_string(),
+            "A=M".to_string(),
+            "M=D".to_string(),
+            "@SP".to_string(),
+            "M=M+1".to_string(),
+        ]);
+    }
+
+    // スタックからpopして直接アドレスに格納
+    fn pop_direct(&mut self, address: &str) {
+        self.output.extend(vec![
+            "@SP".to_string(),
+            "M=M-1".to_string(),
+            "A=M".to_string(),
+            "D=M".to_string(),
+            format!("@{}", address),
+            "M=D".to_string(),
+        ]);
+    }
+
+    // スタックからpopしてベースアドレス + index に格納
+    fn pop_segment(&mut self, base: &str, index: i32) {
+        self.output.extend(vec![
+            format!("@{}", index),
+            "D=A".to_string(),
+            format!("@{}", base),
+            "D=D+M".to_string(),
+            "@R13".to_string(),
+            "M=D".to_string(),
+            "@SP".to_string(),
+            "M=M-1".to_string(),
+            "A=M".to_string(),
+            "D=M".to_string(),
+            "@R13".to_string(),
+            "A=M".to_string(),
+            "M=D".to_string(),
+        ]);
     }
 }
 
@@ -569,6 +553,9 @@ impl VMTranslator {
                     let label = cmd.arg1.context("Missing if-goto label")?;
                     code_writer.write_if_goto(&label);
                 }
+                CommandType::Call => todo!(),
+                CommandType::Function => todo!(),
+                CommandType::Return => todo!(),
             }
             parser.advance();
         }
