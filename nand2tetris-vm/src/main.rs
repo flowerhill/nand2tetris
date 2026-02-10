@@ -408,6 +408,8 @@ impl CodeWriter {
     }
 
     fn write_call(&mut self, function_name: &str, n_args: i32) {
+        self.output.push("// call".to_string());
+
         let return_address_symbol = format!("{}$ret{}", function_name, self.call_counter);
         self.push_value(&return_address_symbol, true);
 
@@ -439,12 +441,72 @@ impl CodeWriter {
         self.output.push(format!("{return_address_symbol}"));
     }
 
-    fn write_function(&mut self, label: &str) {
-        todo!()
+    fn write_function(&mut self, function_name: &str, n_args: i32) {
+        self.output.push("// function".to_string());
+
+        self.output.push(format!("({})", function_name));
+
+        for _ in [0..n_args] {
+            self.write_push("constant", 0);
+        }
     }
 
-    fn write_return(&mut self, label: &str) {
-        todo!()
+    fn write_return(&mut self) {
+        self.output.push("// return".to_string());
+
+        // FRAME = LCL
+        self.output.extend(vec![
+            "@LCL".to_string(),
+            "D=M".to_string(),
+            "@13".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        // RET = *(FRAME - 5)
+        self.output.extend(vec![
+            "@5".to_string(),
+            "A=D-A".to_string(),
+            "D=M".to_string(),
+            "@R14".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        // *ARG = pop()
+        self.output.extend(vec![
+            "@SP".to_string(),
+            "M=M-1".to_string(),
+            "A=M".to_string(),
+            "D=M".to_string(),
+            "@ARG".to_string(),
+            "A=M".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        // SP = ARG + 1
+        self.output.extend(vec![
+            "@ARG".to_string(),
+            "D=M+1".to_string(),
+            "@SP".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        // THAT, THIS, ARG, LCL を復元
+        for segment in ["THAT", "THIS", "ARG", "LCL"] {
+            self.output.extend(vec![
+                "@R13".to_string(),
+                "AM=M-1".to_string(),
+                "D=M".to_string(),
+                format!("@{}", segment),
+                "M=D".to_string(),
+            ]);
+        }
+
+        // goto RET
+        self.output.extend(vec![
+            "@R14".to_string(),
+            "A=M".to_string(),
+            "0;JMP".to_string(),
+        ]);
     }
 
     fn get_output(&self) -> String {
@@ -553,9 +615,17 @@ impl VMTranslator {
                     let label = cmd.arg1.context("Missing if-goto label")?;
                     code_writer.write_if_goto(&label);
                 }
-                CommandType::Call => todo!(),
-                CommandType::Function => todo!(),
-                CommandType::Return => todo!(),
+                CommandType::Call => {
+                    let function_name = cmd.arg1.context("Missing function name")?;
+                    let n_args = cmd.arg2.context("Missing function name")?;
+                    code_writer.write_call(&function_name, n_args);
+                }
+                CommandType::Function => {
+                    let function_name = cmd.arg1.context("Missing function name")?;
+                    let n_args = cmd.arg2.context("Missing function name")?;
+                    code_writer.write_function(&function_name, n_args);
+                }
+                CommandType::Return => code_writer.write_return(),
             }
             parser.advance();
         }
