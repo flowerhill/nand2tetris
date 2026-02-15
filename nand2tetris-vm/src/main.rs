@@ -2,6 +2,29 @@ use anyhow::{Context, Result, bail, ensure};
 use regex::Regex;
 use std::{fs, path::Path};
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() != 2 {
+        eprintln!("Usage: {} <input.vm>", args[0]);
+        std::process::exit(1);
+    }
+
+    let input_path = &args[1];
+
+    VMTranslator::translate_file(input_path).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+
+    let output_path = Path::new(input_path).with_extension("asm");
+    println!(
+        "Translation completed: {} -> {}",
+        input_path,
+        output_path.display()
+    );
+}
+
 fn validate_label(label: &str) -> Result<()> {
     ensure!(!label.is_empty(), "label name cannot be empty");
 
@@ -183,6 +206,11 @@ impl Parser {
                     arg2: Some(n_vars),
                 })
             }
+            "return" => Ok(Command {
+                command_type: CommandType::Return,
+                arg1: None,
+                arg2: None,
+            }),
             _ => bail!(format!("Unkonown command: '{}'", cmd_name)),
         }
     }
@@ -368,7 +396,7 @@ impl CodeWriter {
                 self.pop_segment("LCL", index);
             }
             "static" => {
-                self.pop_direct(&format!("{},{}", self.filename, index));
+                self.pop_direct(&format!("{}.{}", self.filename, index));
             }
             "this" => {
                 self.pop_segment("THIS", index);
@@ -438,7 +466,9 @@ impl CodeWriter {
 
         self.write_goto(function_name);
 
-        self.output.push(format!("{return_address_symbol}"));
+        self.output.push(format!("({return_address_symbol})"));
+
+        self.call_counter += 1;
     }
 
     fn write_function(&mut self, function_name: &str, n_args: i32) {
@@ -446,7 +476,7 @@ impl CodeWriter {
 
         self.output.push(format!("({})", function_name));
 
-        for _ in [0..n_args] {
+        for _ in 0..n_args {
             self.write_push("constant", 0);
         }
     }
@@ -652,53 +682,278 @@ impl VMTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    // ========================================
+    // validate_label
+    // ========================================
+
+    #[rstest]
+    #[case("LOOP")]
+    #[case("_private")]
+    #[case("test.label")]
+    #[case("foo:bar")]
+    #[case("a1b2c3")]
+    #[case("LOOP_START")]
+    #[case("LOOP.END")]
+    #[case("test:1")]
+    fn test_validate_label_ok(#[case] label: &str) {
+        assert!(validate_label(label).is_ok());
+    }
+
+    #[rstest]
+    #[case("")]
+    #[case("123abc")]
+    #[case("123invalid")]
+    #[case("@invalid")]
+    #[case("hello world")]
+    #[case("-start")]
+    fn test_validate_label_err(#[case] label: &str) {
+        assert!(validate_label(label).is_err());
+    }
+
+    // ========================================
+    // Parser: コメント・空行・空入力
+    // ========================================
+
+    #[rstest]
+    #[case("// comment\npush constant 5 // inline\n// end", "@5")]
+    #[case("\n\n\npush constant 42\n\n\n", "@42")]
+    fn test_parser_filters_non_code(#[case] input: &str, #[case] expected: &str) {
+        let result = VMTranslator::translate(input, "test").unwrap();
+        assert!(result.contains(expected));
+    }
+
+    #[rstest]
+    #[case("// just comments\n// another")]
+    #[case("")]
+    fn test_empty_output(#[case] input: &str) {
+        let result = VMTranslator::translate(input, "test").unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ========================================
+    // Parser 単体
+    // ========================================
 
     #[test]
-    fn test_arithmetic_add() {
-        let input = "push constant 7\npush constant 8\nadd";
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("D=A"));
-        assert!(result.contains("M=D+M"));
+    fn test_parser_return_command() {
+        let parser = Parser::new("return");
+        let cmd = parser.parse().unwrap();
+        assert_eq!(cmd.command_type, CommandType::Return);
+        assert!(cmd.arg1.is_none());
+        assert!(cmd.arg2.is_none());
     }
 
     #[test]
-    fn test_push_constant() {
-        let input = "push constant 17";
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("@17"));
-        assert!(result.contains("D=A"));
+    fn test_parser_advance_and_bounds() {
+        let mut parser = Parser::new("push constant 1\npush constant 2\npush constant 3");
+        assert!(parser.has_more_commands());
+        assert_eq!(parser.current_line_number(), 1);
+        parser.advance();
+        assert_eq!(parser.current_line_number(), 2);
+        parser.advance();
+        assert_eq!(parser.current_line_number(), 3);
+        parser.advance();
+        assert!(!parser.has_more_commands());
+        parser.advance(); // 超過しても panic しない
+        assert!(!parser.has_more_commands());
+    }
+
+    // ========================================
+    // エラーケース
+    // ========================================
+
+    #[rstest]
+    #[case("foobar")]
+    #[case("push")]
+    #[case("push constant")]
+    #[case("push constant abc")]
+    #[case("pop")]
+    #[case("pop local")]
+    #[case("goto")]
+    #[case("if-goto")]
+    #[case("call")]
+    #[case("call Foo.bar")]
+    #[case("call Foo.bar xyz")]
+    #[case("function")]
+    #[case("function Foo.bar")]
+    #[case("label")]
+    #[case("label @invalid")]
+    #[case("label 123invalid")]
+    fn test_invalid_input(#[case] input: &str) {
+        assert!(VMTranslator::translate(input, "test").is_err());
+    }
+
+    // ========================================
+    // push セグメント
+    // ========================================
+
+    #[rstest]
+    #[case("push constant 17",  "test",   &["@17", "D=A"])]
+    #[case("push constant 100", "test",   &["@100", "D=A"])]
+    #[case("push local 0",      "test",   &["@LCL"])]
+    #[case("push argument 1",   "test",   &["@ARG"])]
+    #[case("push this 2",       "test",   &["@THIS"])]
+    #[case("push that 3",       "test",   &["@THAT"])]
+    #[case("push temp 2",       "test",   &["@7"])]
+    #[case("push temp 5",       "test",   &["@10"])]
+    #[case("push pointer 0",    "test",   &["@THIS", "D=M"])]
+    #[case("push pointer 1",    "test",   &["@THAT", "D=M"])]
+    #[case("push static 3",     "MyFile", &["@MyFile.3"])]
+    #[case("push static 0",     "Foo",    &["@Foo.0"])]
+    #[case("push static 0",     "Bar",    &["@Bar.0"])]
+    fn test_push(#[case] input: &str, #[case] filename: &str, #[case] expected: &[&str]) {
+        let result = VMTranslator::translate(input, filename).unwrap();
+        for s in expected {
+            assert!(
+                result.contains(s),
+                "Expected '{}' in output for '{}'",
+                s,
+                input
+            );
+        }
+    }
+
+    // ========================================
+    // pop セグメント
+    // ========================================
+
+    #[rstest]
+    #[case("pop local 0",    "test",   &["@LCL", "D=D+M"])]
+    #[case("pop argument 1", "test",   &["@ARG"])]
+    #[case("pop this 2",     "test",   &["@THIS"])]
+    #[case("pop that 3",     "test",   &["@THAT"])]
+    #[case("pop temp 0",     "test",   &["@5"])]
+    #[case("pop pointer 0",  "test",   &["@THIS"])]
+    #[case("pop pointer 1",  "test",   &["@THAT"])]
+    fn test_pop(#[case] input: &str, #[case] filename: &str, #[case] expected: &[&str]) {
+        let result = VMTranslator::translate(input, filename).unwrap();
+        for s in expected {
+            assert!(
+                result.contains(s),
+                "Expected '{}' in output for '{}'",
+                s,
+                input
+            );
+        }
+    }
+
+    // ========================================
+    // 算術・論理
+    // ========================================
+
+    #[rstest]
+    #[case("add", "M=D+M")]
+    #[case("sub", "M=M-D")]
+    #[case("neg", "M=-M")]
+    #[case("and", "M=D&M")]
+    #[case("or", "M=D|M")]
+    #[case("not", "M=!M")]
+    fn test_arithmetic(#[case] op: &str, #[case] expected: &str) {
+        let input = format!("push constant 3\npush constant 5\n{}", op);
+        let result = VMTranslator::translate(&input, "test").unwrap();
+        assert!(result.contains(expected));
+    }
+
+    // ========================================
+    // 比較
+    // ========================================
+
+    #[rstest]
+    #[case("eq", "D;JEQ")]
+    #[case("gt", "D;JGT")]
+    #[case("lt", "D;JLT")]
+    fn test_comparison(#[case] op: &str, #[case] expected_jump: &str) {
+        let input = format!("push constant 3\npush constant 5\n{}", op);
+        let result = VMTranslator::translate(&input, "test").unwrap();
+        assert!(result.contains(expected_jump));
+        assert!(result.contains("(TRUE_0)"));
+        assert!(result.contains("(END_0)"));
     }
 
     #[test]
-    fn test_pop_local() {
-        let input = "pop local 0";
+    fn test_multiple_comparisons_unique_labels() {
+        let input = "push constant 1\npush constant 2\neq\n\
+                      push constant 3\npush constant 4\ngt\n\
+                      push constant 5\npush constant 6\nlt";
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("@LCL"));
-        assert!(result.contains("D=D+M"));
+        for i in 0..3 {
+            assert!(result.contains(&format!("(TRUE_{})", i)));
+            assert!(result.contains(&format!("(END_{})", i)));
+        }
     }
 
-    #[test]
-    fn test_label() {
-        let input = "label LOOP_START";
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("(LOOP_START)"));
-    }
+    // ========================================
+    // label / goto / if-goto
+    // ========================================
 
     #[test]
-    fn test_goto() {
-        let input = "goto END";
+    fn test_label_goto_if_goto() {
+        let input = "label LOOP\ngoto END\nif-goto LOOP";
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("@END"));
-        assert!(result.contains("0;JMP"));
+        for s in ["(LOOP)", "@END", "0;JMP", "@LOOP", "D;JNE"] {
+            assert!(result.contains(s));
+        }
     }
 
-    #[test]
-    fn test_if_goto() {
-        let input = "if-goto LOOP";
+    #[rstest]
+    #[case("label loop_start", "(loop_start)")]
+    #[case("label LOOP.END", "(LOOP.END)")]
+    #[case("label test:1", "(test:1)")]
+    #[case("label _private", "(_private)")]
+    fn test_label_valid_chars(#[case] input: &str, #[case] expected: &str) {
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("@LOOP"));
-        assert!(result.contains("D;JNE"));
+        assert!(result.contains(expected));
     }
+
+    // ========================================
+    // call
+    // ========================================
+
+    #[test]
+    fn test_call() {
+        let result = VMTranslator::translate("call Foo.bar 3", "test").unwrap();
+        for s in [
+            "Foo.bar$ret0",
+            "@LCL",
+            "@ARG",
+            "@THIS",
+            "@THAT",
+            "@8",
+            "@Foo.bar",
+            "0;JMP",
+        ] {
+            assert!(result.contains(s), "Expected '{}'", s);
+        }
+    }
+
+    // ========================================
+    // function
+    // ========================================
+
+    #[test]
+    fn test_function() {
+        let result = VMTranslator::translate("function Foo.bar 2", "test").unwrap();
+        assert!(result.contains("(Foo.bar)"));
+        assert!(result.contains("@0"));
+    }
+
+    // ========================================
+    // return
+    // ========================================
+
+    #[test]
+    fn test_return() {
+        let result = VMTranslator::translate("return", "test").unwrap();
+        for s in ["@LCL", "@13", "@R14", "@5", "AM=M-1", "@ARG", "0;JMP"] {
+            assert!(result.contains(s), "Expected '{}'", s);
+        }
+    }
+
+    // ========================================
+    // 統合テスト
+    // ========================================
 
     #[test]
     fn test_simple_loop() {
@@ -720,12 +975,16 @@ goto LOOP_START
 label LOOP_END
 "#;
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("(LOOP_START)"));
-        assert!(result.contains("(LOOP_BODY)"));
-        assert!(result.contains("(LOOP_END)"));
-        assert!(result.contains("@LOOP_START"));
-        assert!(result.contains("@LOOP_BODY"));
-        assert!(result.contains("@LOOP_END"));
+        for s in [
+            "(LOOP_START)",
+            "(LOOP_BODY)",
+            "(LOOP_END)",
+            "@LOOP_START",
+            "@LOOP_BODY",
+            "@LOOP_END",
+        ] {
+            assert!(result.contains(s));
+        }
     }
 
     #[test]
@@ -742,105 +1001,26 @@ push constant 1
 label END
 "#;
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("(TRUE_BRANCH)"));
-        assert!(result.contains("(END)"));
-        assert!(result.contains("D;JNE"));
+        for s in ["(TRUE_BRANCH)", "(END)", "D;JNE"] {
+            assert!(result.contains(s));
+        }
     }
 
     #[test]
     fn test_nested_labels() {
-        let input = r#"
-label OUTER
-push constant 5
-label INNER
-push constant 10
-goto OUTER
-"#;
+        let input = "label OUTER\npush constant 5\nlabel INNER\npush constant 10\ngoto OUTER";
         let result = VMTranslator::translate(input, "test").unwrap();
         assert!(result.contains("(OUTER)"));
         assert!(result.contains("(INNER)"));
     }
 
     #[test]
-    fn test_label_with_valid_characters() {
-        let input = r#"
-label loop_start
-label LOOP.END
-label test:1
-label _private
-"#;
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("(loop_start)"));
-        assert!(result.contains("(LOOP.END)"));
-        assert!(result.contains("(test:1)"));
-        assert!(result.contains("(_private)"));
-    }
-
-    #[test]
-    fn test_invalid_label_starts_with_digit() {
-        let input = "label 123invalid";
-        let result = VMTranslator::translate(input, "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_invalid_label_empty() {
-        let input = "label";
-        let result = VMTranslator::translate(input, "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_multiple_arithmetic_operations() {
-        let input = r#"
-push constant 10
-push constant 5
-sub
-push constant 2
-add
-neg
-"#;
+        let input = "push constant 10\npush constant 5\nsub\npush constant 2\nadd\nneg";
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("M=M-D")); // sub
-        assert!(result.contains("M=D+M")); // add
-        assert!(result.contains("M=-M")); // neg
-    }
-
-    #[test]
-    fn test_comparison_operations() {
-        let input = r#"
-push constant 5
-push constant 3
-eq
-push constant 10
-push constant 10
-gt
-push constant 2
-push constant 8
-lt
-"#;
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("D;JEQ")); // eq
-        assert!(result.contains("D;JGT")); // gt
-        assert!(result.contains("D;JLT")); // lt
-    }
-
-    #[test]
-    fn test_logical_operations() {
-        let input = r#"
-push constant 5
-push constant 3
-and
-push constant 5
-push constant 3
-or
-push constant 1
-not
-"#;
-        let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("M=D&M")); // and
-        assert!(result.contains("M=D|M")); // or
-        assert!(result.contains("M=!M")); // not
+        for s in ["M=M-D", "M=D+M", "M=-M"] {
+            assert!(result.contains(s));
+        }
     }
 
     #[test]
@@ -863,32 +1043,29 @@ pop pointer 0
 pop pointer 1
 "#;
         let result = VMTranslator::translate(input, "test").unwrap();
-        assert!(result.contains("@LCL"));
-        assert!(result.contains("@ARG"));
-        assert!(result.contains("@THIS"));
-        assert!(result.contains("@THAT"));
-    }
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() != 2 {
-        eprintln!("Usage: {} <input.vm>", args[0]);
-        std::process::exit(1);
+        for s in ["@LCL", "@ARG", "@THIS", "@THAT"] {
+            assert!(result.contains(s));
+        }
     }
 
-    let input_path = &args[1];
+    #[test]
+    fn test_function_call_return_integration() {
+        let input = "function Main.main 0\npush constant 3\ncall Math.mul 1\nreturn\n\
+                      function Math.mul 1\npush argument 0\npop local 0\npush local 0\nreturn";
+        let result = VMTranslator::translate(input, "test").unwrap();
+        for s in ["(Main.main)", "(Math.mul)", "Math.mul$ret", "@R14"] {
+            assert!(result.contains(s));
+        }
+    }
 
-    VMTranslator::translate_file(input_path).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
-
-    let output_path = Path::new(input_path).with_extension("asm");
-    println!(
-        "Translation completed: {} -> {}",
-        input_path,
-        output_path.display()
-    );
+    #[test]
+    fn test_fibonacci_like_loop() {
+        let input = "push constant 0\npop local 0\npush constant 1\npop local 1\n\
+                      label LOOP\npush local 0\npush local 1\nadd\npop local 1\npop local 0\n\
+                      push local 1\npush constant 100\nlt\nif-goto LOOP";
+        let result = VMTranslator::translate(input, "test").unwrap();
+        for s in ["(LOOP)", "@LOOP", "D;JNE", "M=D+M"] {
+            assert!(result.contains(s));
+        }
+    }
 }
