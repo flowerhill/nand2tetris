@@ -6,7 +6,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() != 2 {
-        eprintln!("Usage: {} <input.vm>", args[0]);
+        eprintln!("Usage: {} <input.vm or directory>", args[0]);
         std::process::exit(1);
     }
 
@@ -17,7 +17,17 @@ fn main() {
         std::process::exit(1);
     });
 
-    let output_path = Path::new(input_path).with_extension("asm");
+    let path = Path::new(input_path);
+    let output_path = if path.is_dir() {
+        let dir_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        path.join(format!("{}.asm", dir_name))
+    } else {
+        path.with_extension("asm")
+    };
+
     println!(
         "Translation completed: {} -> {}",
         input_path,
@@ -235,6 +245,10 @@ impl CodeWriter {
             label_counter: 0,
             call_counter: 0,
         }
+    }
+
+    fn set_filename(&mut self, filename: &str) {
+        self.filename = filename.to_string();
     }
 
     fn write_arithmetic(&mut self, cmd: &str) {
@@ -621,11 +635,17 @@ impl CodeWriter {
 pub struct VMTranslator;
 
 impl VMTranslator {
-    pub fn translate(input_path: &str, output_path: &str) -> Result<String> {
-        let mut parser = Parser::new(input_path);
-        let mut code_writer = CodeWriter::new(output_path);
+    pub fn translate(input: &str, filename: &str) -> Result<String> {
+        let mut code_writer = CodeWriter::new(filename);
 
-        code_writer.write_bootstrap();
+        Self::translate_vm(input, filename, &mut code_writer)?;
+
+        Ok(code_writer.get_output())
+    }
+
+    fn translate_vm(input: &str, filename: &str, code_writer: &mut CodeWriter) -> Result<()> {
+        code_writer.set_filename(filename);
+        let mut parser = Parser::new(input);
 
         while parser.has_more_commands() {
             let line_num = parser.current_line_number();
@@ -675,21 +695,79 @@ impl VMTranslator {
             parser.advance();
         }
 
-        Ok(code_writer.get_output())
+        Ok(())
     }
 
     fn translate_file(input_path: &str) -> Result<()> {
-        let input = fs::read_to_string(input_path)
-            .context(format!("Failed to read file '{}'", input_path))?;
-        let filename = Path::new(input_path)
+        let path = Path::new(input_path);
+
+        if path.is_dir() {
+            Self::translate_directory(path)
+        } else {
+            Self::translate_single_file(path)
+        }
+    }
+
+    fn translate_single_file(path: &Path) -> Result<()> {
+        let input = fs::read_to_string(path)
+            .context(format!("Failed to read file '{}'", path.display()))?;
+        let filename = path
             .file_stem()
             .and_then(|s| s.to_str())
             .context("Invalid pattern")?;
 
-        let output = Self::translate(&input, filename)?;
-        let output_path = Path::new(input_path).with_extension("asm");
+        let mut code_writer = CodeWriter::new(filename);
+        code_writer.write_bootstrap();
+        Self::translate_vm(&input, filename, &mut code_writer)?;
 
-        fs::write(&output_path, output)?;
+        let output_path = path.with_extension("asm");
+        fs::write(&output_path, code_writer.get_output())?;
+        Ok(())
+    }
+
+    fn translate_directory(dir: &Path) -> Result<()> {
+        // ディレクトリ内の .vm ファイルを収集
+        let mut vm_files: Vec<std::path::PathBuf> = fs::read_dir(dir)
+            .context(format!("Failed to read directory '{}'", dir.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "vm"))
+            .collect();
+
+        ensure!(
+            !vm_files.is_empty(),
+            "No .vm files found in '{}'",
+            dir.display()
+        );
+
+        // ファイル名順にソート（再現性のため）
+        vm_files.sort();
+
+        // ディレクトリ名を出力ファイル名にする
+        let dir_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("Invalid directory name")?;
+
+        let mut code_writer = CodeWriter::new(dir_name);
+        code_writer.write_bootstrap();
+
+        // 各 .vm ファイルを順番に変換
+        for vm_file in &vm_files {
+            let input = fs::read_to_string(vm_file)
+                .context(format!("Failed to read file '{}'", vm_file.display()))?;
+            let filename = vm_file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .context("Invalid filename")?;
+
+            Self::translate_vm(&input, filename, &mut code_writer)
+                .context(format!("Error translating '{}'", vm_file.display()))?;
+        }
+
+        let output_path = dir.join(format!("{}.asm", dir_name));
+        fs::write(&output_path, code_writer.get_output())?;
+
         Ok(())
     }
 }
