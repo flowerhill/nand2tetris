@@ -539,6 +539,19 @@ impl CodeWriter {
         ]);
     }
 
+    fn write_bootstrap(&mut self) {
+        self.output.push("// bootstrap".to_string());
+
+        self.output.extend(vec![
+            "@256".to_string(),
+            "D=A".to_string(),
+            "@SP".to_string(),
+            "M=D".to_string(),
+        ]);
+
+        self.write_call("Sys.init", 0);
+    }
+
     fn get_output(&self) -> String {
         self.output.join("\n")
     }
@@ -611,6 +624,8 @@ impl VMTranslator {
     pub fn translate(input_path: &str, output_path: &str) -> Result<String> {
         let mut parser = Parser::new(input_path);
         let mut code_writer = CodeWriter::new(output_path);
+
+        code_writer.write_bootstrap();
 
         while parser.has_more_commands() {
             let line_num = parser.current_line_number();
