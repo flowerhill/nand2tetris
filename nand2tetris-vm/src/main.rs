@@ -1,23 +1,31 @@
 use anyhow::{Context, Result, bail, ensure};
+
+use clap::Parser;
 use regex::Regex;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Parser)]
+#[command(about = "Nand2Tetris VM Translator")]
+struct Cli {
+    input: PathBuf,
+    #[arg(long)]
+    no_bootstrap: bool,
+}
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
+    let bootstrap = !cli.no_bootstrap;
+    let input_path = cli.input;
 
-    if args.len() != 2 {
-        eprintln!("Usage: {} <input.vm or directory>", args[0]);
-        std::process::exit(1);
-    }
-
-    let input_path = &args[1];
-
-    VMTranslator::translate_file(input_path).unwrap_or_else(|e| {
+    VMTranslator::translate_file(&input_path, bootstrap).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
 
-    let path = Path::new(input_path);
+    let path = Path::new(&input_path);
     let output_path = if path.is_dir() {
         let dir_name = path
             .file_name()
@@ -30,7 +38,7 @@ fn main() {
 
     println!(
         "Translation completed: {} -> {}",
-        input_path,
+        input_path.display(),
         output_path.display()
     );
 }
@@ -69,12 +77,12 @@ struct Command {
     arg2: Option<i32>,
 }
 
-struct Parser {
+struct VmParser {
     lines: Vec<String>,
     current: usize,
 }
 
-impl Parser {
+impl VmParser {
     fn new(input: &str) -> Self {
         let lines: Vec<String> = input
             .lines()
@@ -85,7 +93,7 @@ impl Parser {
             .filter(|line| !line.is_empty())
             .collect();
 
-        Parser { lines, current: 0 }
+        VmParser { lines, current: 0 }
     }
 
     fn has_more_commands(&self) -> bool {
@@ -645,7 +653,7 @@ impl VMTranslator {
 
     fn translate_vm(input: &str, filename: &str, code_writer: &mut CodeWriter) -> Result<()> {
         code_writer.set_filename(filename);
-        let mut parser = Parser::new(input);
+        let mut parser = VmParser::new(input);
 
         while parser.has_more_commands() {
             let line_num = parser.current_line_number();
@@ -698,17 +706,15 @@ impl VMTranslator {
         Ok(())
     }
 
-    fn translate_file(input_path: &str) -> Result<()> {
-        let path = Path::new(input_path);
-
+    fn translate_file(path: &Path, bootstrap: bool) -> Result<()> {
         if path.is_dir() {
-            Self::translate_directory(path)
+            Self::translate_directory(path, bootstrap)
         } else {
-            Self::translate_single_file(path)
+            Self::translate_single_file(path, bootstrap)
         }
     }
 
-    fn translate_single_file(path: &Path) -> Result<()> {
+    fn translate_single_file(path: &Path, bootstrap: bool) -> Result<()> {
         let input = fs::read_to_string(path)
             .context(format!("Failed to read file '{}'", path.display()))?;
         let filename = path
@@ -717,7 +723,10 @@ impl VMTranslator {
             .context("Invalid pattern")?;
 
         let mut code_writer = CodeWriter::new(filename);
-        code_writer.write_bootstrap();
+
+        if bootstrap {
+            code_writer.write_bootstrap();
+        }
         Self::translate_vm(&input, filename, &mut code_writer)?;
 
         let output_path = path.with_extension("asm");
@@ -725,7 +734,7 @@ impl VMTranslator {
         Ok(())
     }
 
-    fn translate_directory(dir: &Path) -> Result<()> {
+    fn translate_directory(dir: &Path, bootstrap: bool) -> Result<()> {
         // ディレクトリ内の .vm ファイルを収集
         let mut vm_files: Vec<std::path::PathBuf> = fs::read_dir(dir)
             .context(format!("Failed to read directory '{}'", dir.display()))?
@@ -750,7 +759,10 @@ impl VMTranslator {
             .context("Invalid directory name")?;
 
         let mut code_writer = CodeWriter::new(dir_name);
-        code_writer.write_bootstrap();
+
+        if bootstrap {
+            code_writer.write_bootstrap();
+        }
 
         // 各 .vm ファイルを順番に変換
         for vm_file in &vm_files {
@@ -831,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_parser_return_command() {
-        let parser = Parser::new("return");
+        let parser = VmParser::new("return");
         let cmd = parser.parse().unwrap();
         assert_eq!(cmd.command_type, CommandType::Return);
         assert!(cmd.arg1.is_none());
@@ -840,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_parser_advance_and_bounds() {
-        let mut parser = Parser::new("push constant 1\npush constant 2\npush constant 3");
+        let mut parser = VmParser::new("push constant 1\npush constant 2\npush constant 3");
         assert!(parser.has_more_commands());
         assert_eq!(parser.current_line_number(), 1);
         parser.advance();
